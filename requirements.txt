@@ -1,0 +1,15 @@
+onnx==1.12.0
+paddlepaddle
+paddleocr
+pytesseract
+fastapi
+python-multipart
+uvicorn
+orjson
+loguru
+opencv-python-headless
+pydantic-settings
+pillow
+easydict
+python-Levenshtein
+PyYAML
