@@ -1,19 +1,20 @@
 import os
 import cv2
 import math
+
+from matplotlib import pyplot as plt
 from paddleocr import PaddleOCR
 from PIL import Image, ImageDraw
 import numpy as np
 import paddleocr.tools.infer.utility as utility
 from paddleocr.tools.infer.utility import check_gpu
 from paddleocr.tools.infer.predict_det import TextDetector
+from shapely.geometry import Point, Polygon, LineString
 
 from pkg.deploy.python.infer import Detector
-from shapely.geometry import Point, Polygon, LineString
 
 print("GPU", check_gpu(True))
 print("CPU count", os.cpu_count())
-print(os.getcwd())
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 OCR = {
@@ -164,11 +165,12 @@ def get_img_real_angle(img: Image, ocr_model: str):
     return ret_angle
 
 
-def text_ocr(img: Image, ocr_model: str) -> list:
+def text_ocr(img: Image, ocr_model: str, det: bool = True) -> list:
     # angle=get_img_real_angle(img,ocr_model)
     # print(angle)
     ocr = OCR.get(ocr_model, OCR["ch_PP-OCRv4_xx"])
-    return ocr.ocr(np.array(img), cls=True)
+
+    return ocr.ocr(np.array(img), det=det, cls=True)
 
 
 def replace_color(image, low_target_color, high_target_color, replacement_color):
@@ -185,9 +187,10 @@ def replace_color(image, low_target_color, high_target_color, replacement_color)
     return image
 
 
-def seal_text_expand(img, angle):
+def seal_text_expand(img, angle, center=None):
     """
     将图片按照笛卡尔坐标系展开
+    :param center:
     :param img:
     :param angle:
     :return:
@@ -196,7 +199,8 @@ def seal_text_expand(img, angle):
     ROI = img.copy()
     rows, cols, channel = ROI.shape
     img_r = rows // 2
-    center = (cols // 2, rows // 2)
+    if center is None:  # 默认为图片中心点
+        center = (cols // 2, rows // 2)
     rotation_matrix = cv2.getRotationMatrix2D(center, angle=angle, scale=1.0)
     rotated_gray = cv2.warpAffine(ROI, rotation_matrix, (cols, rows))
     # cv2.imshow('rotation', rotated_gray)
@@ -260,16 +264,15 @@ def seal_calculate_angle(img, text_poly, flag=1):
     return angle
 
 
-def draw_box(img, np_boxes):
+def draw_box(im, np_boxes):
     """
     Args:
-        img : opencv image
+        im (PIL.Image.Image): PIL image
         np_boxes (np.ndarray): shape:[N,6], N: number of box,
                                matix element:[class, score, x_min, y_min, x_max, y_max]
     Returns:
         im (PIL.Image.Image): visualized image
     """
-    im = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))  # PIL image
     draw_thickness = min(im.size) // 320
     draw = ImageDraw.Draw(im)
     xmin, ymin, xmax, ymax = np_boxes[2:]
@@ -290,32 +293,41 @@ def seal_ocr(img, img_drawed):
     result_num = det_result['boxes_num']
     if result_num == 0:  # 不存在印章
         print("不存在印章！")
-        return None
+        return None, None
 
     max_indices = np.argsort(-result_array[:, 1])
     max_result = result_array[max_indices[0]].astype(int)
     print("检测印章位置坐标:", max_result)
     img_drawed = draw_box(img_drawed, max_result)  # 可视化印章检测框
     x_min, y_min, x_max, y_max = max_result[2:]
-    _img = img_copy[y_min:y_max, x_min:x_max]
+    pad = int(min(x_max - x_min, y_max - y_min) / 10)
+    _img = img_copy[y_min - pad:y_max + pad, x_min - pad:x_max + pad]
     seal_img = cv2.resize(_img, (320, 320))
     dt_boxes, _ = text_detector(seal_img)
 
     # 可视化印章上的文字检测框
-    # src_im = utility.draw_text_det_res(dt_boxes, img_drawed)
-    # cv2.imshow("test", src_im)
+    # _img = utility.draw_text_det_res(dt_boxes, seal_img)
+    # cv2.imshow("test", _img)
+    # cv2.imwrite("E:\OCR\ocr\PaddleWebOCR\images/test.jpg",seal_img)
 
     for box in dt_boxes:  # 检测出曲线文字
         text_poly = Polygon(box)
         if text_poly.area / text_poly.minimum_rotated_rectangle.area < 0.9:  # 弯曲文本
+            # 获取凸包的外接圆的中心点
+            (x, y), radius = cv2.minEnclosingCircle(box)
+            center = (int(x), int(y))
             calculate_angle1 = seal_calculate_angle(seal_img, text_poly, flag=1)  # 逆时针
             calculate_angle2 = seal_calculate_angle(seal_img, text_poly, flag=-1)  # 顺时针
-            res_angle = (calculate_angle1 + calculate_angle2) / 2
+            if calculate_angle2 + calculate_angle1 == 360:
+                res_angle = 0
+            else:
+                res_angle = (calculate_angle1 + calculate_angle2) / 2
             print("旋转角度", res_angle)
             expand_img = seal_text_expand(seal_img, angle=res_angle)
-            return expand_img
+            adjust_expand_img = seal_text_expand(seal_img, angle=res_angle, center=center)
+            return expand_img, adjust_expand_img
 
-    return None
+    return None, None
 
 
 def seal_text_ocr(img, img_drawed=None):
@@ -332,18 +344,37 @@ def seal_text_ocr(img, img_drawed=None):
     print("进入印章文字检测")
     if img_drawed is None:
         img_drawed = img.copy()
-    resize_img = seal_ocr(np.array(img), img_drawed)
+    resize_img, ad_resize_img = seal_ocr(np.array(img), img_drawed)
     if resize_img is None:
         return None
 
     texts = text_ocr(resize_img, "ch_PP-OCRv4_xx")
-    # print("印章文本检测内容:", texts)
-    ans = []
-    pos = []
+
+    is_second = True  # 是否进行第二次检测，进行中心点校正
     for sub_list in texts[0]:
         # 获取文本内容，只保留识别出来的文本内容
         text = sub_list[1][0]
-        # print("识别印章文本", text)
-        pos.append(sub_list[0])
-        ans.append(text)
+        if "局" in text or "监督" in text:
+            is_second = False
+            break
+
+    ans = []
+    pos = []
+    if is_second:
+        texts = text_ocr(ad_resize_img, "ch_PP-OCRv4_xx", det=False)
+        # 第二次检测只做分类，没有位置检测
+        for sub_list in texts[0]:
+            # 获取文本内容，只保留识别出来的文本内容
+            text = sub_list[0]
+            ans.append(text)
+    else:
+        for sub_list in texts[0]:
+            # 获取文本内容，只保留识别出来的文本内容
+            text = sub_list[1][0]
+            # print("识别印章文本", text)
+            pos.append(sub_list[0])
+            ans.append(text)
+
+    print("印章文本检测内容:", texts)
+
     return resize_img, texts, ans, pos
