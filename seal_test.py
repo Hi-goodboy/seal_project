@@ -37,35 +37,50 @@ if __name__ == "__main__":
 
     cv2.namedWindow("expand", 0)
     cv2.resizeWindow("expand", 1256, 200)
-    cv2.namedWindow("frame", 0)
-    cv2.resizeWindow("frame", 1200, 1200)
 
     time3 = time.time()
     for i, frame in enumerate(image_list):
         print(image_dir_list[i])
-        # img_drawed = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        frame_draw = frame.copy()
-        resize_img = seal_ocr(frame, frame_draw)
+        img_drawed = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        resize_img, ad_resize_img = seal_ocr(frame, img_drawed)
+        show_img = resize_img
         if resize_img is None:
             print("检测失败!")
             continue
 
         texts = text_ocr(resize_img, "ch_PP-OCRv4_xx")
-        time4 = time.time()
-        print('ocr use%.2f' % (time4 - time3))
-        print(texts)
-        seal_ans = []
-        seal_pos = []
+        is_second = True  # 是否进行第二次检测，进行中心点校正
         for sub_list in texts[0]:
             # 获取文本内容，只保留识别出来的文本内容
             text = sub_list[1][0]
-            seal_ans.append(sub_list[0])
-            seal_pos.append(text)
+            if "局" in text or "监督" in text:
+                is_second = False
+                break
 
+        seal_ans = []
+        seal_pos = []
+        if is_second:
+            print("调整中心后第二次检测")
+            time4 = time.time()
+            texts = text_ocr(ad_resize_img, "ch_PP-OCRv4_xx", det=False)
+            print('ocr use%.2f' % (time4 - time3))
+            show_img = ad_resize_img
+
+            # 第二次检测只做分类，没有位置检测
+            for sub_list in texts[0]:
+                # 获取文本内容，只保留识别出来的文本内容
+                text = sub_list[0]
+                seal_ans.append(text)
+        else:
+            for sub_list in texts[0]:
+                # 获取文本内容，只保留识别出来的文本内容
+                text = sub_list[1][0]
+                # print("识别印章文本", text)
+                seal_pos.append(sub_list[0])
+                seal_ans.append(text)
+
+        print(texts)
         cv2.imshow('expand', resize_img)
-        cv2.imshow('frame', frame_draw)
         key = cv2.waitKey(0)
         if key == 27:
             break
-
-
